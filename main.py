@@ -7,12 +7,15 @@ import json
 import time
 import sys
 from PIL import Image, ImageEnhance
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ==============================================================================
 # ⚙️ SETTINGS
 # ==============================================================================
-# Apni API key yahan dalein
-API_KEY = "AIzaSyBw6MUco5E08mdBAbadRzNW2LgKrcEIH3U" 
+# API key is now loaded from .env file
+API_KEY = os.getenv("GEMINI_API_KEY") 
 
 
 # Folder jahan bills ki photos rakhi jayengi
