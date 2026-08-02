@@ -3,3 +3,4 @@ bills/
 __pycache__/
 *.pyc
 temp_processed.jpg
+*.xlsx
