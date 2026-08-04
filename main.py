@@ -6,6 +6,8 @@ import os
 import json
 import time
 import sys
+import uuid
+import concurrent.futures
 from PIL import Image, ImageEnhance
 from dotenv import load_dotenv
 
@@ -50,10 +52,9 @@ def preprocess_image(image_path):
         sharpness = ImageEnhance.Sharpness(img)
         img = sharpness.enhance(2.0)
         
-        temp_path = "temp_processed.jpg"
+        # Har image ke liye alag temp file banayein taki threads me overwrite na ho
+        temp_path = f"temp_processed_{uuid.uuid4().hex}.jpg"
         img.save(temp_path)
-        
-        
 
         return temp_path
     except Exception as e:
@@ -97,10 +98,6 @@ def extract_data_from_image(image_path, retries=3):
             
             response = model.generate_content([sample_file, prompt])
             
-            # Temp file ko delete karo agar wo bani thi
-            if processed_path == "temp_processed.jpg" and os.path.exists(processed_path):
-                os.remove(processed_path)
-            
             # Clean response to parse JSON safely
             raw_text = response.text.strip()
             if raw_text.startswith("```json"):
@@ -118,6 +115,13 @@ def extract_data_from_image(image_path, retries=3):
             else:
                 print(f"[ERROR] '{os.path.basename(image_path)}' ko read karne mein dikkat aayi: {e}")
                 return None
+        finally:
+            # Temp file ko delete karo chahe code success ho ya fail ho
+            if 'processed_path' in locals() and processed_path and "temp_processed" in processed_path and os.path.exists(processed_path):
+                try:
+                    os.remove(processed_path)
+                except:
+                    pass
 
 def main():
     print("="*60)
@@ -165,26 +169,37 @@ def main():
     
     all_data = []
     
-    # Har photo par ek-ek karke loop chalana
-    for count, filename in enumerate(image_files, 1):
-        print(f"--- Process kar raha hai ({count}/{len(image_files)}): {filename} ---")
+    # Multi-threading ke liye helper function
+    def process_single_image(args):
+        count, total, filename = args
+        print(f"--- Process kar raha hai ({count}/{total}): {filename} ---")
         image_path = os.path.join(BILLS_FOLDER, filename)
+        
+        # Thoda delay taki Google API limit na tute (Free tier me 15 RPM max hota hai)
+        time.sleep(3) 
         
         extracted_info = extract_data_from_image(image_path)
         
         if extracted_info:
             extracted_info['Filename'] = filename
-            all_data.append(extracted_info)
             name = extracted_info.get('Customer_Name', 'N/A')
             amt = extracted_info.get('Total_Amount', 'N/A')
             print(f"[SUCCESS] Data mil gaya -> Name: {name} | Amount: {amt}")
+            return extracted_info
         else:
             print(f"[FAILED] '{filename}' se data nikalne mein fail hua.")
-            
-        # API limit se bachne ke liye 5 second ka tharav (delay)
-        if count < len(image_files):
-            print("[*] 5 seconds ka wait kar raha hai (API limit se bachne ke liye)...\n")
-            time.sleep(5)
+            return None
+
+    # Multi-threading setup (max_workers=2 means 2 image at a time)
+    args_list = [(i+1, len(image_files), f) for i, f in enumerate(image_files)]
+    
+    print("[*] Multi-threading Start ho raha hai (2 bills at a time)...")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        results = executor.map(process_single_image, args_list)
+        
+    for res in results:
+        if res:
+            all_data.append(res)
             
     # Data ko Excel mein save karna
     if all_data:
