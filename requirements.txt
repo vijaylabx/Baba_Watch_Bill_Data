@@ -3,3 +3,5 @@ pandas
 openpyxl
 Pillow
 python-dotenv
+tqdm
+PyMuPDF

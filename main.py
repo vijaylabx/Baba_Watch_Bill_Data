@@ -8,6 +8,10 @@ import time
 import sys
 import uuid
 import concurrent.futures
+import shutil
+import re
+import fitz
+from tqdm import tqdm
 from PIL import Image, ImageEnhance
 from dotenv import load_dotenv
 
@@ -33,11 +37,31 @@ model = genai.GenerativeModel('gemini-3.5-flash')
 
 def setup_folder():
     """Ensure the bills folder exists"""
-    if not os.path.exists(BILLS_FOLDER):
-        os.makedirs(BILLS_FOLDER)
-        print(f"[!] '{BILLS_FOLDER}' naam ka folder nahi mila tha, isliye naya folder bana diya gaya hai.")
-        print(f"[!] Kripya apni saari bill ki photos '{BILLS_FOLDER}' folder ke andar dalein aur script dobara chalayein.")
-        sys.exit()
+    folders = [BILLS_FOLDER, os.path.join(BILLS_FOLDER, 'completed'), os.path.join(BILLS_FOLDER, 'failed')]
+    for folder in folders:
+        if not os.path.exists(folder):
+            os.makedirs(folder)
+
+def pdf_to_image(pdf_path):
+    """Converts first page of PDF to Image"""
+    doc = fitz.open(pdf_path)
+    page = doc.load_page(0)
+    pix = page.get_pixmap(dpi=200)
+    img_path = pdf_path.rsplit('.', 1)[0] + '.jpg'
+    pix.save(img_path)
+    return img_path
+
+def clean_data(data):
+    """Formats and cleans extracted data"""
+    if data.get('Customer_Name') and data['Customer_Name'] != "Not Readable":
+        data['Customer_Name'] = data['Customer_Name'].title()
+        
+    if data.get('Mobile_Number') and data['Mobile_Number'] != "Not Readable":
+        mob = re.sub(r'\D', '', data['Mobile_Number'])
+        if len(mob) >= 10:
+            data['Mobile_Number'] = mob[-10:]
+            
+    return data
 
 def preprocess_image(image_path):
     """Enhances the image to make text clearer for OCR"""
@@ -90,6 +114,9 @@ def extract_data_from_image(image_path, retries=3):
             
             Instructions:
             - Invoice_Number is usually near 'क्रम सं०' or 'No.'.
+            - Format 'Date' strictly as DD-MM-YYYY.
+            - Format 'Customer_Name' in Title Case (e.g. Rahul Sharma).
+            - Format 'Mobile_Number' strictly as 10 digits (no spaces or country code).
             - If a field is missing, try very hard to find it anywhere on the page. Only output "Not Readable" if it is impossible to guess.
             - For 'Items_Purchased', combine all item names, IMEI numbers, and details into a single readable string.
             - Pay close attention to messy handwriting. Differentiate between similar looking numbers (e.g., 1 & 7, 0 & 8, 5 & 6) by using context like the Total Amount calculation.
@@ -136,8 +163,8 @@ def main():
 
     setup_folder()
     
-    # Folder se saari images dhoondhna
-    image_files = [f for f in os.listdir(BILLS_FOLDER) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+    # Folder se saari images aur PDFs dhoondhna
+    image_files = [f for f in os.listdir(BILLS_FOLDER) if f.lower().endswith(('.jpg', '.jpeg', '.png', '.pdf'))]
     
     if not image_files:
         print(f"[!] '{BILLS_FOLDER}' folder khali hai. Kripya isme bill ki photos dalein.")
@@ -172,22 +199,38 @@ def main():
     # Multi-threading ke liye helper function
     def process_single_image(args):
         count, total, filename = args
-        print(f"--- Process kar raha hai ({count}/{total}): {filename} ---")
-        image_path = os.path.join(BILLS_FOLDER, filename)
+        original_path = os.path.join(BILLS_FOLDER, filename)
+        image_path = original_path
+        
+        is_pdf = False
+        if image_path.lower().endswith('.pdf'):
+            is_pdf = True
+            try:
+                image_path = pdf_to_image(image_path)
+            except Exception as e:
+                tqdm.write(f"[ERROR] PDF conversion failed for {filename}: {e}")
+                shutil.move(original_path, os.path.join(BILLS_FOLDER, 'failed', filename))
+                return None
         
         # Thoda delay taki Google API limit na tute (Free tier me 15 RPM max hota hai)
         time.sleep(3) 
         
         extracted_info = extract_data_from_image(image_path)
         
+        if is_pdf and os.path.exists(image_path):
+            os.remove(image_path)
+            
         if extracted_info:
+            extracted_info = clean_data(extracted_info)
             extracted_info['Filename'] = filename
             name = extracted_info.get('Customer_Name', 'N/A')
             amt = extracted_info.get('Total_Amount', 'N/A')
-            print(f"[SUCCESS] Data mil gaya -> Name: {name} | Amount: {amt}")
+            tqdm.write(f"[SUCCESS] {filename} -> Name: {name} | Amount: {amt}")
+            shutil.move(original_path, os.path.join(BILLS_FOLDER, 'completed', filename))
             return extracted_info
         else:
-            print(f"[FAILED] '{filename}' se data nikalne mein fail hua.")
+            tqdm.write(f"[FAILED] '{filename}' se data nikalne mein fail hua.")
+            shutil.move(original_path, os.path.join(BILLS_FOLDER, 'failed', filename))
             return None
 
     # Multi-threading setup (max_workers=2 means 2 image at a time)
@@ -195,11 +238,11 @@ def main():
     
     print("[*] Multi-threading Start ho raha hai (2 bills at a time)...")
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        results = executor.map(process_single_image, args_list)
-        
-    for res in results:
-        if res:
-            all_data.append(res)
+        futures = {executor.submit(process_single_image, arg): arg for arg in args_list}
+        for future in tqdm(concurrent.futures.as_completed(futures), total=len(args_list), desc="Processing Bills", unit="bill"):
+            res = future.result()
+            if res:
+                all_data.append(res)
             
     # Data ko Excel mein save karna
     if all_data:
