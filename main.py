@@ -53,9 +53,8 @@ def preprocess_image(image_path):
         temp_path = "temp_processed.jpg"
         img.save(temp_path)
         
-        # Ye line process hui image ko automatic screen par open kar degi
-        img.show()
         
+
         return temp_path
     except Exception as e:
         print(f"[!] Image preprocess fail hui, original use kar rahe hain. Error: {e}")
