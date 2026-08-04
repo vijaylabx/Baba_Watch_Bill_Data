@@ -11,6 +11,7 @@ import concurrent.futures
 import shutil
 import re
 import fitz
+import csv
 from tqdm import tqdm
 from PIL import Image, ImageEnhance
 from dotenv import load_dotenv
@@ -85,7 +86,7 @@ def preprocess_image(image_path):
         print(f"[!] Image preprocess fail hui, original use kar rahe hain. Error: {e}")
         return image_path
 
-def extract_data_from_image(image_path, retries=3):
+def extract_data_from_image(image_path, retries=5):
     """Uploads the image and extracts data using Gemini AI"""
     for attempt in range(retries):
         try:
@@ -137,8 +138,8 @@ def extract_data_from_image(image_path, retries=3):
             
         except Exception as e:
             if attempt < retries - 1:
-                print(f"[!] '{os.path.basename(image_path)}' par error aaya. 10 seconds mein retry kar raha hai... (Attempt {attempt+1}/{retries})")
-                time.sleep(10)
+                print(f"[!] '{os.path.basename(image_path)}' par error aaya. 15 seconds mein retry kar raha hai... (Attempt {attempt+1}/{retries})")
+                time.sleep(15)
             else:
                 print(f"[ERROR] '{os.path.basename(image_path)}' ko read karne mein dikkat aayi: {e}")
                 return None
@@ -237,12 +238,30 @@ def main():
     args_list = [(i+1, len(image_files), f) for i, f in enumerate(image_files)]
     
     print("[*] Multi-threading Start ho raha hai (2 bills at a time)...")
+    
+    # --- REAL-TIME BACKUP CSV SETUP ---
+    csv_file_path = "Backup_Extracted_Data.csv"
+    csv_headers = ['Filename', 'Invoice_Number', 'Date', 'Customer_Name', 'Mobile_Number', 'Address', 'Items_Purchased', 'Total_Amount', 'Salesman_Signature']
+    if not os.path.exists(csv_file_path):
+        with open(csv_file_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=csv_headers, extrasaction='ignore')
+            writer.writeheader()
+    # ----------------------------------
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         futures = {executor.submit(process_single_image, arg): arg for arg in args_list}
         for future in tqdm(concurrent.futures.as_completed(futures), total=len(args_list), desc="Processing Bills", unit="bill"):
             res = future.result()
             if res:
                 all_data.append(res)
+                # --- INSTANT SAVE TO CSV ---
+                try:
+                    with open(csv_file_path, 'a', newline='', encoding='utf-8') as f:
+                        writer = csv.DictWriter(f, fieldnames=csv_headers, extrasaction='ignore')
+                        writer.writerow(res)
+                except Exception:
+                    pass
+                # ---------------------------
             
     # Data ko Excel mein save karna
     if all_data:
